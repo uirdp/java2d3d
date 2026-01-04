@@ -2,5 +2,5 @@
 m5291093 Salim Yanagida
 
 Usage Example:
-javac .\VertViewer.java
+javac .\VertViewer.java </br>
 java VertViewer data/vert/key.vert
