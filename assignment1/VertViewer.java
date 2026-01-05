@@ -14,9 +14,14 @@ public class VertViewer extends JPanel {
     private boolean showTangent = false;
     private boolean showNormal  = false;
 
+    // ---- Curvature display ----
+    private enum CurvatureType { NONE, KA, KB, KC, KD }
+    private CurvatureType curvatureType = CurvatureType.NONE;
+    private boolean showCurvatureText = false;
+
     // Curve shortening flow
     private boolean flowRunning = false;
-    private double dt = 0.0001;
+    private double dt = 0.1;
     private final Timer timer;
 
     // ---- Fixed view transform (computed once from ORIGINAL) ----
@@ -62,6 +67,13 @@ public class VertViewer extends JPanel {
 
                     case KeyEvent.VK_EQUALS, KeyEvent.VK_PLUS -> dt *= 1.2;
                     case KeyEvent.VK_MINUS -> dt /= 1.2;
+
+                    // curvature display toggle by selecting type
+                    case KeyEvent.VK_0 -> { curvatureType = CurvatureType.NONE; showCurvatureText = false; repaint(); }
+                    case KeyEvent.VK_1 -> { curvatureType = CurvatureType.KA;   showCurvatureText = true;  repaint(); }
+                    case KeyEvent.VK_2 -> { curvatureType = CurvatureType.KB;   showCurvatureText = true;  repaint(); }
+                    case KeyEvent.VK_3 -> { curvatureType = CurvatureType.KC;   showCurvatureText = true;  repaint(); }
+                    case KeyEvent.VK_4 -> { curvatureType = CurvatureType.KD;   showCurvatureText = true;  repaint(); }
                 }
             }
         });
@@ -78,8 +90,6 @@ public class VertViewer extends JPanel {
 
     // Compute fixed view transform ONCE using ORIGINAL curve size
     private void ensureFixedViewTransform(int w, int h) {
-        // if you want to recompute on window resize, keep this condition;
-        // if you want truly "only once", remove the resize part.
         if (viewInitialized && w == lastW && h == lastH) return;
 
         lastW = w;
@@ -161,16 +171,12 @@ public class VertViewer extends JPanel {
                 dot = Math.max(-1.0, Math.min(1.0, dot));
                 double theta = Math.acos(dot);
 
-                // ---- SIGN FIX (as requested) ----
-                // With inward normals and update: P^{t+1} = P^t - dt*K*N,
-                // disk.vert should have NEGATIVE curvature.
                 double cross = ax * by - ay * bx;
-                if (cross > 0) theta = -theta;  // <-- changed from (cross < 0)
+                if (cross > 0) theta = -theta;
 
-                // curvature (kd-style)
+                // curvature kd-style used for flow
                 double kappa = (2.0 * Math.sin(theta)) / w;
 
-                // Update: P_{i,t+1} = P_{i,t} - dt * K_i * N_i
                 double newX = p.x - dt * kappa * nx;
                 double newY = p.y - dt * kappa * ny;
 
@@ -179,6 +185,16 @@ public class VertViewer extends JPanel {
 
             current.set(ci, next);
         }
+    }
+
+    private double curvatureFromTheta(double theta, double w, CurvatureType type) {
+        return switch (type) {
+            case KA -> theta;
+            case KB -> 2.0 * Math.sin(theta / 2.0);
+            case KC -> 2.0 * Math.tan(theta / 2.0);
+            case KD -> (w == 0) ? 0.0 : (2.0 * Math.sin(theta) / w);
+            case NONE -> 0.0;
+        };
     }
 
     @Override
@@ -192,13 +208,16 @@ public class VertViewer extends JPanel {
         int w = getWidth();
         int h = getHeight();
 
-        // ---- FIX: compute scale/center ONCE from ORIGINAL ----
+        // ---- FIXED view: compute scale/center ONCE from ORIGINAL ----
         ensureFixedViewTransform(w, h);
 
         // Apply fixed transform (do NOT change per iteration)
         g2.translate(w / 2.0, h / 2.0);
         g2.scale(fixedScale, -fixedScale);
         g2.translate(-dataCenterX, -dataCenterY);
+
+        // Save world transform (for curvature text)
+        AffineTransform worldTx = g2.getTransform();
 
         // draw curve
         g2.setStroke(new BasicStroke((float)(1.5 / fixedScale)));
@@ -216,23 +235,32 @@ public class VertViewer extends JPanel {
             g2.draw(path);
         }
 
-        // tangent/normal viz (length based on ORIGINAL span, not shrinking span)
+        // tangent/normal viz (length based on ORIGINAL span)
         double vecLen = 0.05 * dataSpanX;
+
+        // curvature text offset (world units)
+        double textOffset = 0.02 * dataSpanX;
 
         for (var comp : current) {
             int n = comp.size();
             if (n < 3) continue;
 
-            for (int i = 0; i < n; i += 5) {
+            // if showing curvature text, don't draw for every point (too dense)
+            int step = showCurvatureText ? 10 : 5;
+
+            for (int i = 0; i < n; i += step) {
                 Point2D.Double pm = comp.get((i - 1 + n) % n);
                 Point2D.Double p  = comp.get(i);
                 Point2D.Double pp = comp.get((i + 1) % n);
 
-                double tx = pp.x - pm.x;
-                double ty = pp.y - pm.y;
-                double tl = Math.hypot(tx, ty);
-                if (tl == 0) continue;
-                tx /= tl; ty /= tl;
+                // chord between pm and pp
+                double wx = pp.x - pm.x;
+                double wy = pp.y - pm.y;
+                double wlen = Math.hypot(wx, wy);
+                if (wlen == 0) continue;
+
+                double tx = wx / wlen;
+                double ty = wy / wlen;
 
                 double nx = -ty;
                 double ny =  tx;
@@ -254,6 +282,43 @@ public class VertViewer extends JPanel {
                             p.y + ny * vecLen
                     ));
                 }
+
+                if (showCurvatureText && curvatureType != CurvatureType.NONE) {
+                    // theta between (pm->p) and (p->pp)
+                    double ax = p.x - pm.x, ay = p.y - pm.y;
+                    double bx = pp.x - p.x, by = pp.y - p.y;
+                    double la = Math.hypot(ax, ay);
+                    double lb = Math.hypot(bx, by);
+                    if (la == 0 || lb == 0) continue;
+
+                    double dot = (ax * bx + ay * by) / (la * lb);
+                    dot = Math.max(-1.0, Math.min(1.0, dot));
+                    double theta = Math.acos(dot);
+
+                    // same signed-theta convention as flow
+                    double cross = ax * by - ay * bx;
+                    if (cross > 0) theta = -theta;
+
+                    double kVal = curvatureFromTheta(theta, wlen, curvatureType);
+
+                    // position of text in WORLD coords (slightly along normal)
+                    Point2D.Double worldPos = new Point2D.Double(
+                            p.x + nx * textOffset,
+                            p.y + ny * textOffset
+                    );
+                    Point2D screenPos = worldTx.transform(worldPos, null);
+
+                    // draw text in SCREEN coords
+                    g2.setTransform(new AffineTransform());
+                    g2.setColor(Color.MAGENTA);
+                    g2.setFont(new Font("Consolas", Font.PLAIN, 25));
+                    g2.drawString(String.format("%.3f", kVal),
+                            (float) screenPos.getX(),
+                            (float) screenPos.getY());
+
+                    // back to world
+                    g2.setTransform(worldTx);
+                }
             }
         }
 
@@ -264,6 +329,7 @@ public class VertViewer extends JPanel {
         g2.setFont(new Font("Consolas", Font.PLAIN, 12));
         g2.drawString("F: run/pause   S: step   R: reset   +/-: dt  (dt=" + String.format("%.5f", dt) + ")", 10, 20);
         g2.drawString("T: tangent   N: normal", 10, 38);
+        g2.drawString("Curvature: 1:Ka(theta) 2:Kb 3:Kc 4:Kd 0:off", 10, 56);
         g2.setTransform(saved);
     }
 
@@ -271,7 +337,7 @@ public class VertViewer extends JPanel {
         try {
             var components = VertFileLoader.LoadFromVertFile(args[0]);
 
-            JFrame frame = new JFrame("Curve Shortening Flow");
+            JFrame frame = new JFrame("Project 1");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             frame.setSize(800, 600);
 
